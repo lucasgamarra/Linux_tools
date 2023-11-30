@@ -1,0 +1,48 @@
+#!/bin/bash
+
+# Define variables
+MANAGER_HOST="olvm.example.com"
+CA_SUBJECT="/C=US/O=domain.com/CN=host.domain.com"
+CA_PASSWORD=""
+SSH_KEY="/etc/pki/ovirt-engine/keys/engine_id_rsa"
+KVM_HOSTS=("host1.example.com" "host2.example.com")  # Agrega todos tus nodos KVM aqui
+
+# Manual KVM Hosts re-enrollment
+for HOST in "${KVM_HOSTS[@]}"; do
+    echo "Re-enrolling KVM host ${HOST}..."
+
+    # Create signing request on the KVM host
+    cat > "/tmp/${HOST}.conf" << EOF
+[ req ]
+distinguished_name = req_distinguished_name
+prompt = no
+[ v3_ca ]
+subjectKeyIdentifier=hash
+authorityKeyIdentifier=keyid:always,issuer:always
+basicConstraints = CA:true
+[ req_distinguished_name ]
+O = example.org
+CN = ${HOST}
+EOF
+
+    openssl req -new -key "/etc/pki/vdsm/keys/vdsmkey.pem" -out "/tmp/${HOST}.req" -config "/tmp/${HOST}.conf"
+    scp -i "${SSH_KEY}" "/tmp/${HOST}.req" "root@${MANAGER_HOST}:/etc/pki/ovirt-engine/requests/"
+
+    # Sign the request on the manager
+    ssh -i "${SSH_KEY}" "root@${MANAGER_HOST}" "/usr/share/ovirt-engine/bin/pki-enroll-request.sh --name=${HOST} --subject=\"/O=example.org/CN=${HOST}\" --san=\"DNS:${HOST}\" --days=1800"
+
+    # Copy signed certificates to the KVM host
+    scp -i "${SSH_KEY}" "/etc/pki/ovirt-engine/ca.pem" "root@${HOST}:/etc/pki/CA/cacert.pem"
+    scp -i "${SSH_KEY}" "/etc/pki/ovirt-engine/ca.pem" "root@${HOST}:/etc/pki/vdsm/certs/cacert.pem"
+    scp -i "${SSH_KEY}" "/etc/pki/ovirt-engine/ca.pem" "root@${HOST}:/etc/pki/vdsm/libvirt-spice/ca-cert.pem"
+    scp -i "${SSH_KEY}" "/etc/pki/ovirt-engine/ca.pem" "root@${HOST}:/etc/pki/vdsm/libvirt-vnc/ca-cert.pem"
+    scp -i "${SSH_KEY}" "/etc/pki/ovirt-engine/certs/${HOST}.cer" "root@${HOST}:/etc/pki/vdsm/certs/vdsmcert.pem"
+    scp -i "${SSH_KEY}" "/etc/pki/ovirt-engine/certs/${HOST}.cer" "root@${HOST}:/etc/pki/vdsm/libvirt-spice/server-cert.pem"
+    scp -i "${SSH_KEY}" "/etc/pki/ovirt-engine/certs/${HOST}.cer" "root@${HOST}:/etc/pki/vdsm/libvirt-vnc/server-cert.pem"
+    scp -i "${SSH_KEY}" "/etc/pki/ovirt-engine/certs/${HOST}.cer" "root@${HOST}:/etc/pki/libvirt/clientcert.pem"
+
+    # Restart services on the KVM host
+    ssh -i "${SSH_KEY}" "root@${HOST}" "systemctl restart libvirtd mom-vdsm ovirt-imageio vdsmd supervdsmd"
+done
+
+echo "Script execution completed."
